@@ -1,4 +1,4 @@
-# Email Queue System
+# Rabbit Mails
 
 Sistema de envio de e-mails assíncrono com fila RabbitMQ, API em PHP 8.4, dois workers em paralelo e dashboard Vue.js para monitoramento em tempo real.
 
@@ -300,8 +300,6 @@ docker compose down -v
 │   └── tests/              Testes Vitest
 │
 ├── docker-compose.yml
-├── SPECS.md                Especificação completa do sistema
-└── CLAUDE.md               Guia de implementação
 ```
 
 ---

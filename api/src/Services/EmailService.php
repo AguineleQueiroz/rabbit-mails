@@ -18,23 +18,23 @@ class EmailService
         );
 
         if (!$socket) {
-            throw new \RuntimeException("Failed to connect to SMTP: {$errstr} ({$errno})");
+            throw new \RuntimeException("Falha ao conectar ao SMTP: {$errstr} ({$errno})");
         }
 
         stream_set_timeout($socket, 10);
 
         $this->expect($socket, '220');
-        $this->cmd($socket, "EHLO email queue", '250');
+        $this->cmd($socket, "EHLO emailqueue", '250');
 
         /* STARTTLS — negotiated when MAIL_TLS=true (port 587) */
         if (($_ENV['MAIL_TLS'] ?? 'false') === 'true') {
             $this->cmd($socket, 'STARTTLS', '220');
             if (!stream_socket_enable_crypto($socket, true, STREAM_CRYPTO_METHOD_TLS_CLIENT)) {
                 fclose($socket);
-                throw new \RuntimeException('Failed to initiate TLS with the SMTP server.');
+                throw new \RuntimeException('Falha ao iniciar TLS com o servidor SMTP.');
             }
             /* EHLO again after TLS - required by RFC 3207 */
-            $this->cmd($socket, "EHLO email queue", '250');
+            $this->cmd($socket, "EHLO emailqueue", '250');
         }
 
         /* AUTH LOGIN — triggered when MAIL_USER and MAIL_PASS are set. */

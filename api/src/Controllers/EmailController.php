@@ -27,7 +27,7 @@ readonly class EmailController
         }
 
         if (!filter_var($recipient, FILTER_VALIDATE_EMAIL)) {
-            return Response::json(['error' => 'Invalid  e-mail'], 422);
+            return Response::json(['error' => 'E-mail inválido'], 422);
         }
 
         $email = $this->emails->create(compact('recipient', 'subject', 'body'));

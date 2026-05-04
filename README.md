@@ -1,96 +1,189 @@
 # Rabbit Mails
 
-Sistema de envio de e-mails assíncrono com fila RabbitMQ, API em PHP 8.4, dois workers em paralelo e dashboard Vue.js para monitoramento em tempo real.
+Sistema de envio de e-mails assíncrono com fila RabbitMQ, API em PHP 8.2, workers paralelos e dashboard Vue.js para monitoramento em tempo real.
 
-## Pré-requisitos
+---
 
-- [Docker](https://docs.docker.com/get-docker/) 24+
-- [Docker Compose](https://docs.docker.com/compose/) v2 (já incluso no Docker Desktop)
+## Como funciona
 
-Verifique as versões:
+Em vez de enviar e-mails direto no request HTTP (lento, bloqueante), o sistema usa uma fila:
+
+1. A **API** recebe o pedido, salva no banco e publica na fila — resposta imediata ao cliente
+2. Os **Workers** consomem a fila, enviam o e-mail via SMTP e atualizam o status
+3. O **Dashboard** exibe tudo em tempo real: filas, workers, status dos e-mails e eventos
+
+---
+
+## Arquitetura do sistema
+
+```
+  Cliente / Aplicação
+         │
+         │  POST /api/emails
+         ▼
+  ┌─────────────┐
+  │    Nginx    │  :8000
+  └──────┬──────┘
+         │
+         ▼
+  ┌─────────────┐     INSERT / UPDATE      ┌──────────────────┐
+  │   API PHP   │ ────────────────────────▶│   PostgreSQL     │
+  │  (Publisher)│                          │      :5432       │
+  └──────┬──────┘                          └──────────────────┘
+         │ publish
+         ▼
+  ┌──────────────────────────────────────┐
+  │            RabbitMQ                  │
+  │                                      │
+  │  ┌──────────────┐                    │
+  │  │emails.pending│◀─── TTL expirou ──┐│
+  │  └──────┬───────┘                   ││
+  │         │ consume                   ││
+  │         ▼                           ││
+  │  ┌─────────────┐  ┌──────────────┐  ││
+  │  │  Worker 1   │  │  Worker 2    │  ││
+  │  └──────┬──────┘  └──────┬───────┘  ││
+  │         │                │           ││
+  │         └───────┬────────┘           ││
+  │                 │ falhou < 3x        ││
+  │                 ├──────────────────▶ ┤│
+  │                 │                   ││  ┌───────────────┐
+  │                 │                   └┼─▶│ emails.retry  │
+  │                 │ falhou 3x          │  │  (TTL 30–90s) │
+  │                 ├────────────────────┼─▶└───────────────┘
+  │                 │                   │
+  │                 │                   │  ┌───────────────┐
+  │                 │                   └─▶│  emails.dead  │
+  │                 │                      │     (DLQ)     │
+  └─────────────────┼──────────────────────┴───────────────┘
+                    │
+          ┌─────────┼──────────┐
+          │         │          │
+          ▼         ▼          ▼
+  ┌──────────┐ ┌─────────┐ ┌──────────────────┐
+  │ Mailpit  │ │  Redis  │ │   PostgreSQL      │
+  │ SMTP     │ │heartbeat│ │ UPDATE status     │
+  │ :1025    │ │  :6379  │ │ INSERT events     │
+  │ UI :8025 │ └─────────┘ └──────────────────┘
+  └──────────┘
+         ▲
+  ┌──────┴──────┐
+  │  Dashboard  │  polling a cada 5s
+  │  Vue :5173  │ ─────────────────▶ GET /api/dashboard/*
+  └─────────────┘
+```
+
+---
+
+## Ciclo de vida de um e-mail
+
+```
+  Cliente                 API                RabbitMQ             Worker              SMTP / BD
+     │                     │                     │                   │                    │
+     │── POST /api/emails ─▶│                     │                   │                    │
+     │                     │── INSERT pending ───────────────────────────────────────────▶│ PostgreSQL
+     │                     │── publish ─────────▶│                   │                    │
+     │                     │── UPDATE queued ────────────────────────────────────────────▶│ PostgreSQL
+     │◀── 202 { queued } ──│                     │                   │                    │
+     │                     │                     │                   │                    │
+     │                     │                     │── deliver ────────▶│                   │
+     │                     │                     │                   │── UPDATE process. ─▶│ PostgreSQL
+     │                     │                     │                   │                    │
+     │                     │                     │              ┌────┴─────────────────┐  │
+     │                     │                     │              │  tenta enviar SMTP   │  │
+     │                     │                     │              └────┬─────────────────┘  │
+     │                     │                     │                   │                    │
+     │                     │            SUCESSO  │                   │── EHLO / DATA ────▶│ Mailpit
+     │                     │                     │                   │◀── 250 OK ─────────│
+     │                     │                     │                   │── UPDATE sent ─────▶│ PostgreSQL
+     │                     │                     │                   │                    │
+     │                     │       FALHA < 3x    │                   │── UPDATE failed ───▶│ PostgreSQL
+     │                     │                     │◀── publish retry ─│                    │
+     │                     │                     │  (TTL: N × 30s)   │                    │
+     │                     │                     │── TTL expirou ────▶│  (tenta de novo)  │
+     │                     │                     │                   │                    │
+     │                     │       FALHA = 3x    │                   │── UPDATE dead ─────▶│ PostgreSQL
+     │                     │                     │◀── publish dead ──│                    │
+     │                     │                     │  (DLQ — parado)   │                    │
+```
+
+---
+
+## Stack
+
+| Camada | Tecnologia |
+|---|---|
+| API / Backend | PHP 8.2 (sem framework) |
+| Message Broker | RabbitMQ 3.x |
+| Banco de Dados | PostgreSQL 16 |
+| Cache / Heartbeat | Redis 7 |
+| SMTP local | Mailpit |
+| Frontend | Vue 3 + TypeScript + Vite |
+| Estilo | Tailwind CSS |
+| Gráficos | Chart.js + vue-chartjs |
+| Testes backend | Pest PHP |
+| Testes frontend | Vitest |
+| Containers | Docker + Docker Compose |
+
+---
+
+## Início rápido
+
+### Pré-requisitos
+
+- Docker 24+
+- Docker Compose v2
+
 ```bash
 docker --version
 docker compose version
 ```
 
----
-
-## 1. Clone o repositório
+### 1. Clone o repositório
 
 ```bash
 git clone <url-do-repositorio>
-cd async-mails-rabbitmq
+cd rabbit-mails
 ```
 
----
+### 2. Configure o ambiente
 
-## 2. Configure as variáveis de ambiente
-
-Copie o arquivo de exemplo:
 ```bash
 cp api/.env.example api/.env
 ```
 
-As variáveis já estão preenchidas para o ambiente Docker local — nenhuma alteração é necessária para rodar localmente.
+O arquivo já vem configurado para o ambiente local — nenhuma alteração é necessária para rodar.
 
-<details>
-<summary>Ver variáveis disponíveis</summary>
-
-```env
-DB_HOST=postgres          # Nome do serviço PostgreSQL no Docker
-RABBITMQ_HOST=rabbitmq    # Nome do serviço RabbitMQ no Docker
-REDIS_HOST=redis
-MAIL_HOST=mailpit          # SMTP local (Mailpit)
-RETRY_TTL_SECONDS=30       # Base do backoff de retry (tentativa N × 30s)
-HEARTBEAT_INTERVAL=5       # Frequência do heartbeat dos workers (segundos)
-```
-</details>
-
----
-
-## 3. Suba a infraestrutura
+### 3. Suba tudo
 
 ```bash
 docker compose up -d
 ```
 
-Na primeira execução o Docker irá:
-1. Baixar as imagens (`nginx`, `postgres`, `rabbitmq`, `redis`, `mailpit`, `node`)
-2. Construir as imagens da `api` e do `dashboard`
-3. Instalar dependências PHP (`composer install`) e Node (`npm install`)
-4. Executar as migrations SQL automaticamente no PostgreSQL
+Na primeira execução (~60s), o Docker baixa as imagens, instala dependências PHP e Node e executa as migrations automaticamente.
 
-Aguarde todos os serviços ficarem prontos (~60 segundos na primeira vez):
+Verifique se todos os serviços estão prontos:
+
 ```bash
 docker compose ps
 ```
 
-Todos os serviços devem aparecer como `running`. Os serviços `api` e `consumer` aguardam os healthchecks do PostgreSQL e do RabbitMQ antes de subir.
+### 4. Confirme que está funcionando
 
----
-
-## 4. Verifique se tudo está funcionando
-
-**API:**
 ```bash
+# API
 curl http://localhost:8000/api/health
-# {"status":"ok"}
-```
+# → {"status":"ok"}
 
-**Banco de dados:**
-```bash
+# Banco (deve listar: emails, queue_events, consumers_log)
 docker compose exec postgres psql -U user -d emailqueue -c "\dt"
-# Deve listar: emails, queue_events, consumers_log
 ```
 
-**RabbitMQ:**
-
-Abra http://localhost:15672 no browser (login: `guest` / `guest`).
-Vá em *Queues* — você deve ver `emails.pending`, `emails.retry` e `emails.dead`.
+Abra o [RabbitMQ Management](http://localhost:15672) (login `guest` / `guest`) → aba *Queues*: você deve ver `emails.pending`, `emails.retry` e `emails.dead`.
 
 ---
 
-## 5. Envie um e-mail de teste
+## Enviando um e-mail
 
 ```bash
 curl -s -X POST http://localhost:8000/api/emails \
@@ -103,6 +196,7 @@ curl -s -X POST http://localhost:8000/api/emails \
 ```
 
 Resposta esperada:
+
 ```json
 {
   "id": "uuid-gerado",
@@ -111,80 +205,128 @@ Resposta esperada:
 }
 ```
 
----
+Acompanhe o processamento:
 
-## 6. Acompanhe o processamento
-
-**Mailpit** — visualize o e-mail recebido:
-```
-http://localhost:8025
-```
-
-**Logs dos workers em tempo real:**
 ```bash
+# Logs dos workers em tempo real
 docker compose logs -f consumer
+
+# Status do e-mail pelo ID retornado acima
+curl http://localhost:8000/api/emails/<id>
+# status evolui: queued → processing → sent
 ```
 
-**Status do e-mail pelo ID retornado no passo 5:**
-```bash
-curl http://localhost:8000/api/emails/<id-retornado>
-```
-
-O campo `status` deve evoluir de `queued` → `processing` → `sent`.
+Veja o e-mail capturado no **Mailpit**: [http://localhost:8025](http://localhost:8025)
 
 ---
 
-## 7. Acesse o dashboard
+## Serviços e portas
 
-```
-http://localhost:5173
-```
-
-O dashboard atualiza automaticamente a cada 5 segundos e mostra:
-- **/** — métricas gerais, gráfico de envios por hora, workers e eventos recentes
-- **/emails** — tabela paginada com filtro por status e botão de reprocessamento
-- **/consumers** — status dos workers ativos (heartbeat Redis)
-- **/events** — log completo de eventos da fila
-
----
-
-## 8. Execute os testes
-
-### Testes PHP (Pest)
-
-Os testes ficam em `api/tests/` e estão divididos em duas suítes:
-
-| Suíte | Diretório | Dependências externas |
+| Serviço | URL | Credenciais |
 |---|---|---|
-| Unit | `tests/Unit/` | Nenhuma — usa mocks |
-| Feature | `tests/Feature/` | PostgreSQL (banco real) |
+| API (via Nginx) | http://localhost:8000 | — |
+| Dashboard Vue | http://localhost:5173 | — |
+| RabbitMQ Management | http://localhost:15672 | `guest` / `guest` |
+| Mailpit (e-mails capturados) | http://localhost:8025 | — |
+| PostgreSQL | `localhost:5432` | `user` / `secret` |
+| Redis | `localhost:6379` | — |
 
-**Todos os testes de uma vez** (requer `docker compose up -d` com PostgreSQL e RabbitMQ rodando):
+---
+
+## Dashboard
+
+Acesse [http://localhost:5173](http://localhost:5173) — atualiza automaticamente a cada 5 segundos.
+
+| Rota | O que mostra |
+|---|---|
+| `/` | Cards de métricas, gráfico de envios por hora e eventos recentes |
+| `/emails` | Tabela paginada com filtro por status e botão de reprocessamento |
+| `/consumers` | Workers ativos com último heartbeat e contagem de envios |
+| `/events` | Log completo de eventos da fila |
+
+---
+
+## API — Referência
+
+### E-mails
+
+| Método | Rota | Descrição |
+|---|---|---|
+| `POST` | `/api/emails` | Publica e-mail na fila |
+| `GET` | `/api/emails` | Lista e-mails (`?status=&page=&per_page=`) |
+| `GET` | `/api/emails/{id}` | Detalhe de um e-mail |
+| `POST` | `/api/emails/{id}/requeue` | Recoloca e-mail na fila |
+
+### Dashboard
+
+| Método | Rota | Descrição |
+|---|---|---|
+| `GET` | `/api/dashboard/stats` | Totais: pending, sent, failed, workers ativos |
+| `GET` | `/api/dashboard/chart` | Envios por hora (últimas 24h) |
+| `GET` | `/api/dashboard/queue` | Status da fila via RabbitMQ Management API |
+| `GET` | `/api/dashboard/consumers` | Workers ativos (via Redis) |
+| `GET` | `/api/dashboard/events` | Últimos N eventos (`?limit=50`) |
+| `GET` | `/api/health` | Healthcheck da API |
+
+---
+
+## Variáveis de ambiente
+
+O arquivo `api/.env.example` contém todos os valores prontos para uso local. As principais:
+
+```env
+# Banco
+DB_HOST=postgres
+DB_DATABASE=emailqueue
+DB_USERNAME=user
+DB_PASSWORD=secret
+
+# RabbitMQ
+RABBITMQ_HOST=rabbitmq
+RABBITMQ_USER=guest
+RABBITMQ_PASSWORD=guest
+
+# SMTP — Mailpit (local, sem autenticação)
+MAIL_HOST=mailpit
+MAIL_PORT=1025
+MAIL_FROM=noreply@emailqueue.local
+MAIL_USER=
+MAIL_PASS=
+
+# Redis (heartbeat dos workers)
+REDIS_HOST=redis
+
+# Workers
+HEARTBEAT_INTERVAL=5      # segundos entre heartbeats
+RETRY_TTL_SECONDS=30      # base do backoff: tentativa N × 30s
+```
+
+> Para usar um SMTP real em produção (ex.: Brevo), descomente o bloco correspondente no `.env.example` e preencha as credenciais.
+
+---
+
+## Testes
+
+### Backend (Pest)
+
 ```bash
+# Todos os testes
 docker compose run --rm api vendor/bin/pest
-```
 
-**Apenas testes unitários** (não precisam de banco — útil durante desenvolvimento):
-```bash
+# Apenas unitários (sem banco)
 docker compose run --rm api vendor/bin/pest tests/Unit
-```
 
-**Apenas testes de feature** (disparam contra o banco de dados real):
-```bash
+# Apenas de integração (requer PostgreSQL)
 docker compose run --rm api vendor/bin/pest tests/Feature
-```
 
-**Um único teste pelo nome** (filtro por substring do título):
-```bash
+# Filtrar por nome
 docker compose run --rm api vendor/bin/pest --filter "cria e-mail"
-```
 
-**Com relatório de cobertura:**
-```bash
+# Com cobertura
 docker compose run --rm api vendor/bin/pest --coverage
 ```
 
-#### O que cada suíte cobre
+**O que está coberto:**
 
 ```
 tests/Unit/
@@ -200,18 +342,13 @@ tests/Feature/
 └── WorkerTest.php           — fluxo de sucesso, retry progressivo, dead letter
 ```
 
-> **Nota:** O teste `EmailServiceTest` gera um `WARN` porque `fsockopen()` é bloqueado no
-> ambiente de CI sem SMTP disponível. Isso é esperado — o comportamento de erro está coberto.
+### Frontend (Vitest)
 
-### Testes do dashboard (Vitest)
-
-Com os serviços rodando:
 ```bash
+# Executar uma vez
 docker compose exec dashboard npm run test
-```
 
-Em modo watch (durante desenvolvimento):
-```bash
+# Modo watch (durante desenvolvimento)
 docker compose exec dashboard npm run test -- --watch
 ```
 
@@ -224,87 +361,79 @@ dashboard/tests/
 
 ---
 
-## Serviços e Portas
+## Regras de negócio
 
-| Serviço | URL / Porta | Credenciais |
-|---|---|---|
-| API (via Nginx) | http://localhost:8000 | — |
-| Dashboard Vue | http://localhost:5173 | — |
-| RabbitMQ Management | http://localhost:15672 | `guest` / `guest` |
-| Mailpit (e-mails capturados) | http://localhost:8025 | — |
-| PostgreSQL | `localhost:5432` | `user` / `secret` |
-| Redis | `localhost:6379` | — |
+- E-mails nunca são deletados — apenas mudam de status
+- Máximo de **3 tentativas** por e-mail
+- Retry com backoff: tentativa 1 = 30s · tentativa 2 = 60s · tentativa 3 = 120s
+- Worker envia heartbeat a cada 5s para Redis (TTL 15s) — se parar de bater, é marcado como inativo
+- Requeue manual (via dashboard) reseta `attempts` para 0
+- A API **nunca envia e-mail diretamente** — sempre via fila
 
 ---
 
-## Operações Comuns
+## Comandos úteis
 
 ```bash
-# Parar todos os serviços (dados preservados)
+# Parar (dados preservados)
 docker compose stop
 
 # Subir novamente
 docker compose up -d
 
-# Escalar para mais workers
+# Escalar workers
 docker compose up -d --scale consumer=4
 
-# Ver logs de um serviço específico
-docker compose logs -f nginx
-docker compose logs -f api
+# Logs de um serviço
 docker compose logs -f consumer
+docker compose logs -f api
 
 # Acessar o banco interativamente
 docker compose exec postgres psql -U user -d emailqueue
 
-# Verificar workers registrados no Redis
+# Ver workers registrados no Redis
 docker compose exec redis redis-cli keys 'consumer:*'
 
 # Reconstruir imagens após mudança no Dockerfile ou composer.json
-docker compose build api
-docker compose up -d
+docker compose build api && docker compose up -d
 
-# Destruir tudo incluindo volumes (dados serão perdidos)
+# Destruir tudo, incluindo volumes (dados serão perdidos)
 docker compose down -v
 ```
 
 ---
 
-## Estrutura do Projeto
+## Estrutura do projeto
 
 ```
-.
-├── api/                    PHP 8.4-FPM — API e workers
+rabbit-mails/
+├── api/
 │   ├── consumer/           Worker de processamento da fila
-│   ├── database/           Migrations SQL
-│   ├── docs/               Documentação técnica da API
-│   ├── nginx/              Configuração do Nginx
+│   ├── database/           Migrations SQL (executadas automaticamente)
 │   ├── public/             Entry point HTTP (index.php)
-│   ├── src/                Código-fonte PHP
-│   │   ├── Controllers/
-│   │   ├── Http/
-│   │   ├── Middleware/
-│   │   ├── Repositories/
-│   │   └── Services/
-│   └── tests/              Testes Pest (Unit + Feature)
-│
-├── dashboard/              Vue 3 + TypeScript — Interface web
-│   ├── docs/               Documentação técnica do dashboard
-│   ├── nginx/              Configuração Nginx para produção
 │   ├── src/
-│   │   ├── components/
-│   │   ├── composables/
-│   │   ├── services/
-│   │   ├── types/
-│   │   └── views/
-│   └── tests/              Testes Vitest
+│   │   ├── Controllers/    EmailController, DashboardController
+│   │   ├── Http/           Request, Response, Pipeline (middleware)
+│   │   ├── Middleware/     CorsMiddleware, JsonMiddleware
+│   │   ├── Repositories/   EmailRepository, EventRepository
+│   │   └── Services/       QueueService, EmailService, HeartbeatService
+│   └── tests/              Pest — Unit + Feature
 │
-├── docker-compose.yml
+├── dashboard/
+│   ├── src/
+│   │   ├── components/     StatsCards, EmailTable, ConsumerPanel, EventLog
+│   │   ├── composables/    useStats, useEmails, usePolling
+│   │   ├── services/       api.ts (axios)
+│   │   ├── types/          index.ts
+│   │   └── views/          Dashboard, Emails, Consumers, Events
+│   └── tests/              Vitest
+│
+└── docker-compose.yml
 ```
 
 ---
 
-## Documentação Técnica
+## Documentação técnica
 
-- [`api/docs/`](api/docs/README.md) — infraestrutura, camada HTTP, services, repositories, worker, banco e testes
-- [`dashboard/docs/`](dashboard/docs/README.md) — tipos, composables, componentes, views, Nginx e testes
+- [`api/docs/`](api/docs/README.md) — infraestrutura, HTTP, services, repositories, worker e banco
+- [`dashboard/docs/`](dashboard/docs/README.md) — tipos, composables, componentes, views e Nginx

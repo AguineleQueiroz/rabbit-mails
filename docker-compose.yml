@@ -40,8 +40,6 @@ services:
     env_file: ./api/.env
     deploy:
       replicas: 2
-    environment:
-      - WORKER_ID=worker-${HOSTNAME}
 
   dashboard:
     build:

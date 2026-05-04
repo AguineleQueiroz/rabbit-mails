@@ -18,5 +18,7 @@ WORKDIR /var/www/api
 COPY . .
 RUN composer install --no-interaction
 
-# php-fpm listen to port 9000
+# php-fpm must listen on all interfaces so nginx (separate container) can reach it
+RUN echo '[www]\nlisten = 0.0.0.0:9000' >> /usr/local/etc/php-fpm.d/zz-docker.conf
+
 CMD ["php-fpm"]

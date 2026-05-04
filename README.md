@@ -2,7 +2,7 @@
 
 Sistema de envio de e-mails assíncrono com fila RabbitMQ, API em PHP 8.2, workers paralelos e dashboard Vue.js para monitoramento em tempo real.
 
----
+<img width="1504" height="943" alt="rabbit" src="https://github.com/user-attachments/assets/1315517d-7451-4537-a012-1b8f1d95a7c0" />
 
 ## Como funciona
 
@@ -15,97 +15,11 @@ Em vez de enviar e-mails direto no request HTTP (lento, bloqueante), o sistema u
 ---
 
 ## Arquitetura do sistema
-
-```
-  Cliente / Aplicação
-         │
-         │  POST /api/emails
-         ▼
-  ┌─────────────┐
-  │    Nginx    │  :8000
-  └──────┬──────┘
-         │
-         ▼
-  ┌─────────────┐     INSERT / UPDATE      ┌──────────────────┐
-  │   API PHP   │ ────────────────────────▶│   PostgreSQL     │
-  │  (Publisher)│                          │      :5432       │
-  └──────┬──────┘                          └──────────────────┘
-         │ publish
-         ▼
-  ┌──────────────────────────────────────┐
-  │            RabbitMQ                  │
-  │                                      │
-  │  ┌──────────────┐                    │
-  │  │emails.pending│◀─── TTL expirou ──┐│
-  │  └──────┬───────┘                   ││
-  │         │ consume                   ││
-  │         ▼                           ││
-  │  ┌─────────────┐  ┌──────────────┐  ││
-  │  │  Worker 1   │  │  Worker 2    │  ││
-  │  └──────┬──────┘  └──────┬───────┘  ││
-  │         │                │           ││
-  │         └───────┬────────┘           ││
-  │                 │ falhou < 3x        ││
-  │                 ├──────────────────▶ ┤│
-  │                 │                   ││  ┌───────────────┐
-  │                 │                   └┼─▶│ emails.retry  │
-  │                 │ falhou 3x          │  │  (TTL 30–90s) │
-  │                 ├────────────────────┼─▶└───────────────┘
-  │                 │                   │
-  │                 │                   │  ┌───────────────┐
-  │                 │                   └─▶│  emails.dead  │
-  │                 │                      │     (DLQ)     │
-  └─────────────────┼──────────────────────┴───────────────┘
-                    │
-          ┌─────────┼──────────┐
-          │         │          │
-          ▼         ▼          ▼
-  ┌──────────┐ ┌─────────┐ ┌──────────────────┐
-  │ Mailpit  │ │  Redis  │ │   PostgreSQL      │
-  │ SMTP     │ │heartbeat│ │ UPDATE status     │
-  │ :1025    │ │  :6379  │ │ INSERT events     │
-  │ UI :8025 │ └─────────┘ └──────────────────┘
-  └──────────┘
-         ▲
-  ┌──────┴──────┐
-  │  Dashboard  │  polling a cada 5s
-  │  Vue :5173  │ ─────────────────▶ GET /api/dashboard/*
-  └─────────────┘
-```
-
----
+<img width="1536" height="1024" alt="rabbit-mails-diag" src="https://github.com/user-attachments/assets/0b538c73-ae62-4376-af91-4d6e94cf9657" />
 
 ## Ciclo de vida de um e-mail
 
-```
-  Cliente                 API                RabbitMQ             Worker              SMTP / BD
-     │                     │                     │                   │                    │
-     │── POST /api/emails ─▶│                     │                   │                    │
-     │                     │── INSERT pending ───────────────────────────────────────────▶│ PostgreSQL
-     │                     │── publish ─────────▶│                   │                    │
-     │                     │── UPDATE queued ────────────────────────────────────────────▶│ PostgreSQL
-     │◀── 202 { queued } ──│                     │                   │                    │
-     │                     │                     │                   │                    │
-     │                     │                     │── deliver ────────▶│                   │
-     │                     │                     │                   │── UPDATE process. ─▶│ PostgreSQL
-     │                     │                     │                   │                    │
-     │                     │                     │              ┌────┴─────────────────┐  │
-     │                     │                     │              │  tenta enviar SMTP   │  │
-     │                     │                     │              └────┬─────────────────┘  │
-     │                     │                     │                   │                    │
-     │                     │            SUCESSO  │                   │── EHLO / DATA ────▶│ Mailpit
-     │                     │                     │                   │◀── 250 OK ─────────│
-     │                     │                     │                   │── UPDATE sent ─────▶│ PostgreSQL
-     │                     │                     │                   │                    │
-     │                     │       FALHA < 3x    │                   │── UPDATE failed ───▶│ PostgreSQL
-     │                     │                     │◀── publish retry ─│                    │
-     │                     │                     │  (TTL: N × 30s)   │                    │
-     │                     │                     │── TTL expirou ────▶│  (tenta de novo)  │
-     │                     │                     │                   │                    │
-     │                     │       FALHA = 3x    │                   │── UPDATE dead ─────▶│ PostgreSQL
-     │                     │                     │◀── publish dead ──│                    │
-     │                     │                     │  (DLQ — parado)   │                    │
-```
+<img width="1536" height="1024" alt="rabbit-mails-sequence-diag" src="https://github.com/user-attachments/assets/c0e244d5-ee13-46d4-86df-b3a69af9fec0" />
 
 ---
 
